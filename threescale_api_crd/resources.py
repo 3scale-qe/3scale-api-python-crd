@@ -8,10 +8,12 @@ import string
 import os
 import secrets
 import random
+import time
+from urllib.parse import quote_plus
+
 import yaml
 import requests
 import openshift_client as ocp
-import time
 
 import threescale_api
 import threescale_api.resources
@@ -178,7 +180,9 @@ class Proxies(DefaultClientNestedCRD, threescale_api.resources.Proxies):
 
     def delete(self):
         """This functions is not implemented for Proxies."""
-        raise threescale_api.errors.ThreeScaleApiError("Delete not implemented for Proxies")
+        raise threescale_api.errors.ThreeScaleApiError(
+            "Delete not implemented for Proxies"
+        )
 
     def deploy(self):
         """
@@ -366,8 +370,7 @@ class MappingRules(DefaultClientNestedCRD, threescale_api.resources.MappingRules
                 return obj[key][0]
             met = self.parent.metrics.read(int(obj[key]))
             return met["system_name"].split(".")[0]
-        else:
-            return obj[key]
+        return obj[key]
 
     @staticmethod
     def insert_into_position(maps, params, spec):
@@ -393,7 +396,7 @@ class MappingRules(DefaultClientNestedCRD, threescale_api.resources.MappingRules
         if "last" in params.keys():
             return maps[-1]
         for mapi in maps:
-            if all([params[key] == mapi[key] for key in params.keys()]):
+            if all(params[key] == mapi[key] for key in params.keys()):
                 return mapi
         return None
 
@@ -595,7 +598,7 @@ class Metrics(DefaultClientNestedCRD, threescale_api.resources.Metrics):
         self.parent.read()
         self.parent.update({"metrics": maps})
         for mapi in self.get_list():
-            if all([params[key] == mapi[key] for key in params.keys()]):
+            if all(params[key] == mapi[key] for key in params.keys()):
                 return mapi
         return None
 
@@ -714,7 +717,7 @@ class BackendUsages(DefaultClientNestedCRD, threescale_api.resources.BackendUsag
         self.parent.update({"backend_usages": maps})
         params.pop("name", None)
         for mapi in self.get_list():
-            if all([params[key] == mapi[key] for key in params.keys()]):
+            if all(params[key] == mapi[key] for key in params.keys()):
                 return mapi
         return None
 
@@ -924,7 +927,7 @@ class ApplicationPlans(
         self.parent.read()
         self.parent.update({"application_plans": maps})
         for mapi in self.get_list():
-            if all([params[key] == mapi[key] for key in params.keys()]):
+            if all(params[key] == mapi[key] for key in params.keys()):
                 return mapi
         return None
 
@@ -1139,6 +1142,7 @@ class Promotes(DefaultClientCRD, threescale_api.defaults.DefaultClient):
     SELECTOR = "ProxyConfigPromote"
     ID_NAME = "productId"
     # flake8: noqa E501
+    # pylint: disable=line-too-long
     ERROR_MSG = '[]: Invalid value: "": cannot promote to staging as no product changes detected. Delete this proxyConfigPromote CR, then introduce changes to configuration, and then create a new proxyConfigPromote CR'
 
     def __init__(
@@ -1176,12 +1180,67 @@ class Promotes(DefaultClientCRD, threescale_api.defaults.DefaultClient):
 
         if not state["Failed"] and state["Ready"]:
             return True
-        else:
-            # extract message for 'Failed'
-            msg = [st["message"] for st in conds if st["type"] == "Failed"]
-            if msg and msg[0] == Promotes.ERROR_MSG:
-                return True
+
+        # extract message for 'Failed'
+        msg = [st["message"] for st in conds if st["type"] == "Failed"]
+        if msg and msg[0] == Promotes.ERROR_MSG:
+            return True
+        return False
+
+
+class AppAuths(DefaultClientCRD, threescale_api.defaults.DefaultClient):
+    """
+    CRD client for Application Auths. This class is only implemented in CRD and not in 3scale API.
+    """
+
+    CRD_IMPLEMENTED = True
+    SPEC = constants.SPEC_APP_AUTH
+    KEYS = constants.KEYS_APP_AUTH
+    SELECTOR = "ApplicationAuth"
+    ID_NAME = ""
+    # flake8: noqa E501
+    READY_MSG = "Application authentication has been successfully pushed, any further interactions with this CR will not be applied"
+
+    def __init__(
+        self,
+        parent,
+        *args,
+        entity_name="",
+        entity_collection="app_auths",
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            parent=parent,
+            entity_name=entity_name,
+            entity_collection=entity_collection,
+            **kwargs,
+        )
+
+    def before_create(self, params, spec):
+        """Called before create."""
+
+    def before_update(self, new_params, resource):
+        """Called before update."""
+        pass
+
+    def _is_ready(self, obj):
+        """Is object ready?"""
+        if not ("status" in obj.model and "conditions" in obj.model.status):
             return False
+        state = {"Failed": True, "Ready": False}
+        conds = obj.as_dict()["status"]["conditions"]
+        for sta in conds:
+            state[sta["type"]] = sta["status"] == "True"
+
+        if not state["Failed"] and state["Ready"]:
+            return True
+
+        # extract message for 'Failed'
+        msg = [st["message"] for st in conds if st["type"] == "Failed"]
+        if msg and msg[0] == AppAuths.READY_MSG:
+            return True
+        return False
 
 
 class Tenants(DefaultClientCRD, threescale_api.resources.Tenants):
@@ -1451,15 +1510,13 @@ class Limits(DefaultClientNestedCRD, threescale_api.resources.Limits):
                     if self.metric[BackendMetrics.ID_NAME] == obj["metric_name"]
                     and self.metric.parent["system_name"] == obj["backend_name"]
                 ]
-            else:
-                return [
-                    obj
-                    for obj in instance
-                    if self.metric[Metrics.ID_NAME] == obj["metric_name"]
-                    and "backend_name" not in obj.entity
-                ]
-        else:
-            return [obj for obj in instance]
+            return [
+                obj
+                for obj in instance
+                if self.metric[Metrics.ID_NAME] == obj["metric_name"]
+                and "backend_name" not in obj.entity
+            ]
+        return [obj for obj in instance]
 
 
 class PricingRules(DefaultClientNestedCRD, threescale_api.resources.PricingRules):
@@ -1650,15 +1707,13 @@ class PricingRules(DefaultClientNestedCRD, threescale_api.resources.PricingRules
                     if self.metric[Metrics.ID_NAME] == obj["metric_name"]
                     and self.metric.parent["system_name"] == obj["backend_name"]
                 ]
-            else:
-                return [
-                    obj
-                    for obj in instance
-                    if self.metric[Metrics.ID_NAME] == obj["metric_name"]
-                    and "backend_name" not in obj.entity
-                ]
-        else:
-            return [obj for obj in instance]
+            return [
+                obj
+                for obj in instance
+                if self.metric[Metrics.ID_NAME] == obj["metric_name"]
+                and "backend_name" not in obj.entity
+            ]
+        return [obj for obj in instance]
 
 
 class Applications(DefaultClientCRD, threescale_api.resources.Applications):
@@ -1712,7 +1767,37 @@ class Applications(DefaultClientCRD, threescale_api.resources.Applications):
 
     def before_update(self, new_params, resource):
         """Called before update."""
-        pass
+        new_user_key = new_params.pop("user_key", None)
+        if new_user_key:
+            app_auth_params = {}
+            app_auth_params["applicationCRName"] = resource["name"]
+            secret_name = "keysec" + "".join(
+                random.choice(string.ascii_lowercase) for _ in range(5)
+            )
+
+            spec_sec = copy.deepcopy(constants.SPEC_SECRET)
+            spec_sec["metadata"]["name"] = secret_name
+            spec_sec["metadata"]["namespace"] = self.threescale_client.ocp_namespace
+
+            if new_params.pop("generateSecret", None):
+                spec_sec["data"]["UserKey"] = ""
+                app_auth_params["generateSecret"] = True
+            else:
+                app_auth_params["generateSecret"] = False
+
+                key_ascii = str(new_user_key).encode("ascii")
+                key_enc = base64.b64encode(key_ascii)
+
+                spec_sec["data"]["UserKey"] = key_enc.decode("ascii")
+
+            result = ocp.create(spec_sec)
+            assert result.status() == 0
+
+            app_auth_params["authSecretRef"] = {"name": secret_name}
+
+            app_auth = self.threescale_client.app_auths.create(params=app_auth_params)
+            app_auth.delete()
+            result.delete()
 
     def _is_ready(self, obj):
         """Is object ready?"""
@@ -1726,8 +1811,59 @@ class Applications(DefaultClientCRD, threescale_api.resources.Applications):
         """Translate entity to CRD."""
         if key in ["service_name", "account_name"]:
             return {"name": obj[key]}
+        return obj[key]
+
+
+class ApplicationKeys(threescale_api.resources.ApplicationKeys):
+    """Application Keys class"""
+
+    def __init__(self, *args, entity_name="key", entity_collection="keys", **kwargs):
+        super().__init__(
+            *args,
+            entity_name=entity_name,
+            entity_collection=entity_collection,
+            **kwargs,
+        )
+
+    def create(
+        self, params: dict = None, **kwargs
+    ) -> "threescale_api.resources.ApplicationKey":
+        """Create a new instance of ApplicationKey via AppAuth instance."""
+        params.pop("application_id", None)
+        params.pop("account_id", None)
+
+        params["applicationCRName"] = self.parent["name"]
+        secret_name = "keysec" + "".join(
+            random.choice(string.ascii_lowercase) for _ in range(5)
+        )
+
+        spec_sec = copy.deepcopy(constants.SPEC_SECRET)
+        spec_sec["metadata"]["name"] = secret_name
+        spec_sec["metadata"]["namespace"] = self.threescale_client.ocp_namespace
+
+        if "generateSecret" in params and params["generateSecret"]:
+            spec_sec["data"]["ApplicationKey"] = ""
         else:
-            return obj[key]
+            params["generateSecret"] = False
+
+            key = params.pop("key")
+            key_ascii = str(key).encode("ascii")
+            key_enc = base64.b64encode(key_ascii)
+
+            spec_sec["data"]["ApplicationKey"] = key_enc.decode("ascii")
+
+        result = ocp.create(spec_sec)
+        assert result.status() == 0
+
+        params["authSecretRef"] = {"name": secret_name}
+
+        app_auth = self.threescale_client.app_auths.create(params=params, **kwargs)
+        app_auth.delete()
+        result.delete()
+        key_list = self.list()
+        key = sorted(key_list, key=lambda key: key["created_at"])[-1]
+        key.entity_id = quote_plus(key["value"])
+        return key
 
 
 class Methods(DefaultClientNestedCRD, threescale_api.resources.Methods):
@@ -1777,7 +1913,7 @@ class Methods(DefaultClientNestedCRD, threescale_api.resources.Methods):
         self.topmost_parent().read()
         self.topmost_parent().update({"methods": maps})
         for mapi in self.get_list():
-            if all([params[key] == mapi[key] for key in params.keys()]):
+            if all(params[key] == mapi[key] for key in params.keys()):
                 return mapi
         return None
 
@@ -1966,7 +2102,7 @@ class Proxy(DefaultResourceCRD, threescale_api.resources.Proxy):
                 "auth_user_key",
                 "auth_app_id",
                 "auth_app_key",
-                "api_test_path"
+                "api_test_path",
             ]
             if any([att not in entity for att in required_attrs]):
                 self.client.disable_crd_implemented()
@@ -1991,8 +2127,7 @@ class Proxy(DefaultResourceCRD, threescale_api.resources.Proxy):
         prom.delete()
         if ide and int(ide) == self.parent["id"]:
             return True
-        else:
-            return False
+        return False
 
     def promote(self, **kwargs):
         """
@@ -2012,8 +2147,7 @@ class Proxy(DefaultResourceCRD, threescale_api.resources.Proxy):
         prom.delete()
         if ide and int(ide) == self.parent["id"]:
             return True
-        else:
-            return False
+        return False
 
     @property
     def service(self) -> "Service":
@@ -2150,7 +2284,7 @@ class OpenApiRef:
         if "url" in spec:
             url = spec["url"]
             entity["url"] = url
-            res = requests.get(url)
+            res = requests.get(urli, timeout=60)
             if url.endswith(".yaml") or url.endswith(".yml"):
                 entity["body"] = json.dumps(
                     yaml.load(res.content, Loader=yaml.SafeLoader)
@@ -2940,6 +3074,30 @@ class Promote(DefaultResourceCRD):
         super().__init__(crd=crd, entity=entity, entity_name=entity_name, **kwargs)
 
 
+class AppAuth(DefaultResourceCRD):
+    """
+    CRD resource for ApplicationAuth.
+    """
+
+    GET_PATH = "spec"
+
+    def __init__(self, entity_name="", **kwargs):
+        entity = None
+        crd = None
+        if "spec" in kwargs:
+            spec = kwargs.pop("spec")
+            crd = kwargs.pop("crd")
+
+            entity = {}
+            for key, value in spec.items():
+                for cey, walue in constants.KEYS_APP_AUTH.items():
+                    if key == walue:
+                        entity[cey] = value
+            entity["id"] = entity["authSecretRef"]["name"]
+
+        super().__init__(crd=crd, entity=entity, entity_name=entity_name, **kwargs)
+
+
 class Application(DefaultResourceCRD, threescale_api.resources.Application):
     """
     CRD resource for Application.
@@ -2994,8 +3152,7 @@ class Application(DefaultResourceCRD, threescale_api.resources.Application):
     def account(self) -> "Account":
         if self.client.account:
             return self.client.account
-        else:
-            return self.parent.accounts.read_by_name(self.entity["account_name"])
+        return self.parent.accounts.read_by_name(self.entity["account_name"])
 
     def set_state(self, state: str):
         """Sets the state for the resource
@@ -3014,14 +3171,23 @@ class Application(DefaultResourceCRD, threescale_api.resources.Application):
             app = self.update({"suspend": False})
             status = "live"
         counters = [89, 55, 34, 21, 13, 8, 5, 3, 2, 1, 1, 1]
-        while app["state"] != status and len(counters):
+        while app["state"] != status and counters:
             time.sleep(counters.pop())
             app = app.read()
 
         return app
 
+    @property
+    def keys(self):
+        "Application keys"
+        return ApplicationKeys(
+            parent=self, instance_klass=threescale_api.resources.ApplicationKey
+        )
+
 
 class Method(DefaultResourceCRD, threescale_api.resources.Method):
+    """Method class"""
+
     GET_PATH = "spec/methods"
     system_name_to_id = {}
     id_to_system_name = {}
@@ -3046,10 +3212,10 @@ class Method(DefaultResourceCRD, threescale_api.resources.Method):
 
             self.entity_id = entity["id"]
             super().__init__(crd=crd, entity=entity, entity_name=entity_name, **kwargs)
-        else:
-            # this is not here because of some backup, but because we need to have option
-            # to creater empty object without any data. This is related to "lazy load"
-            super().__init__(entity_name=entity_name, **kwargs)
+
+        # this is not here because of some backup, but because we need to have option
+        # to creater empty object without any data. This is related to "lazy load"
+        super().__init__(entity_name=entity_name, **kwargs)
 
     @property
     def metric(self) -> "Metric":

@@ -95,6 +95,7 @@ see https://github.com/3scale/3scale-operator/blob/master/doc/backend-reference.
 - ProxyConfigPromote
 - Applications
 - Methods
+- ApplicationAuth
 
 Command to run integration unit tests: `pipenv run pytest --log-cli-level=10 -vvvv -s ./tests/integration/ |& tee x`
  

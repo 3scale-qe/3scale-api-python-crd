@@ -7,7 +7,8 @@ SERVICE_AUTH = {"userkey": "1", "appKeyAppID": "2", "oidc": "oidc"}
 SERVICE_AUTH_DEFS = {
     "1": {
         "userkey": {
-            "authUserKey": "token",
+            #  "token", see https://issues.redhat.com/browse/THREESCALE-11072
+            "authUserKey": "user_key",
             "credentials": "authorization",
             "gatewayResponse": {},
         },
@@ -57,7 +58,8 @@ SPEC_SERVICE = {
             "apicastHosted": {
                 "authentication": {
                     "userkey": {
-                        "authUserKey": "token",
+                        #  "token", see https://issues.redhat.com/browse/THREESCALE-11072
+                        "authUserKey": "user_key",
                         "credentials": "query",
                         "gatewayResponse": {},
                     },
@@ -309,6 +311,26 @@ SPEC_PROMOTE = {
     },
 }
 
+SPEC_APP_AUTH = {
+    "apiVersion": "capabilities.3scale.net/v1beta1",
+    "kind": "ApplicationAuth",
+    "metadata": {
+        "name": None,
+        "namespace": None,
+        "annotations": {"insecure_skip_verify": "true"},
+    },
+    "spec": {
+        "providerAccountRef": {
+            "name": None,
+        },
+        "applicationCRName": None,
+        "generateSecret": False,
+        "authSecretRef": {
+            "name": None,
+        },
+    },
+}
+
 SPEC_APPLICATION = {
     "apiVersion": "capabilities.3scale.net/v1beta1",
     "kind": "Application",
@@ -532,6 +554,12 @@ KEYS_PROMOTE = {
     "productCRName": "productCRName",
     "production": "production",
     "deleteCR": "deleteCR",
+}
+
+KEYS_APP_AUTH = {
+    "applicationCRName": "applicationCRName",
+    "generateSecret": "generateSecret",
+    "authSecretRef": "authSecretRef",
 }
 
 KEYS_APPLICATION = {
