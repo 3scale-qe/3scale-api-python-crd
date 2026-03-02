@@ -1,5 +1,6 @@
 """ Module with resources for CRD for Threescale client """
 
+import backoff
 import logging
 import copy
 import json
@@ -25,6 +26,54 @@ from threescale_api_crd.defaults import (
 from threescale_api_crd import constants
 
 LOG = logging.getLogger(__name__)
+BACKOFF_MAX_TRIES = 12
+
+
+class CRDNotReadyError(Exception):
+    """Raised when CRD is not yet ready or synced."""
+    pass
+
+
+def _is_crd_ready(crd):
+    """Check if CRD has status.conditions indicating it's ready to use.
+
+    Ready states:
+    - Synced=True or Ready=True
+    - Orphan=True (waiting for parent resource) with no Failed/Invalid
+    """
+    crd_dict = crd.as_dict()
+    status = crd_dict.get("status")
+    if not status:
+        return False
+    conditions = status.get("conditions", [])
+    state = {"Failed": False, "Invalid": False, "Synced": False, "Ready": False, "Orphan": False}
+    for cond in conditions:
+        cond_type = cond.get("type")
+        if cond_type in state:
+            state[cond_type] = cond.get("status") == "True"
+    # Fail if Failed or Invalid
+    if state["Failed"] or state["Invalid"]:
+        return False
+    # Ready if Synced, Ready, or Orphan (waiting for parent)
+    return state["Synced"] or state["Ready"] or state["Orphan"]
+
+
+def _crd_status_info(crd, crd_type: str) -> str:
+    """Generate descriptive error message for CRD not ready state."""
+    crd_dict = crd.as_dict()
+    name = crd_dict.get("metadata", {}).get("name", "unknown")
+    namespace = crd_dict.get("metadata", {}).get("namespace", "unknown")
+    status = crd_dict.get("status")
+    if not status:
+        return f"{crd_type} '{name}' in namespace '{namespace}' has no status"
+    conditions = status.get("conditions", [])
+    if not conditions:
+        return f"{crd_type} '{name}' in namespace '{namespace}' has no conditions"
+    cond_summary = ", ".join(
+        f"{c.get('type')}={c.get('status')}" + (f" ({c.get('message')})" if c.get("message") else "")
+        for c in conditions
+    )
+    return f"{crd_type} '{name}' in namespace '{namespace}' not ready: {cond_summary}"
 
 
 class Services(DefaultClientCRD, threescale_api.resources.Services):
@@ -1004,14 +1053,22 @@ class Accounts(DefaultClientCRD, threescale_api.resources.Accounts):
         )
 
     def before_create(self, params, spec):
-        """Called before create."""
+        """Called before create.
+
+        Returns:
+            List of (resource, id_name) tuples for dependent resources that
+            need to be waited on after the main object is created.
+        """
         if "username" in params:
             pars = params.copy()
             pars["account_name"] = pars["name"]
             pars["name"] = secrets.token_urlsafe(8)
             # first user should be admin
             pars["role"] = "admin"
-            self.parent.threescale_client.account_users.create(params=pars)
+            user = self.parent.threescale_client.account_users.create(params=pars)
+            # Return the user so that create() waits for it to have its ID
+            return [(user, AccountUsers.ID_NAME)]
+        return []
 
     def before_update(self, new_params, resource):
         """Called before update."""
@@ -1979,6 +2036,13 @@ class Service(DefaultResourceCRD, threescale_api.resources.Service):
                 for cey, walue in constants.KEYS_SERVICE.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Service"))
+
+            _wait()
             entity["id"] = crd.as_dict().get("status").get(Services.ID_NAME)
             # add ids to cache
             if entity["id"] and entity[entity_name]:
@@ -2040,6 +2104,13 @@ class Proxy(DefaultResourceCRD, threescale_api.resources.Proxy):
             crd = kwargs.pop("crd")
             self.spec_path = []
             entity = {}
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Proxy"))
+
+            _wait()
             # there is no attribute which can simulate Proxy id, service id should be used
             entity["id"] = crd.as_dict().get("status").get(Services.ID_NAME)
             # apicastHosted or ApicastSelfManaged
@@ -2335,6 +2406,13 @@ class ActiveDoc(DefaultResourceCRD, threescale_api.resources.ActiveDoc):
                 for cey, walue in constants.KEYS_ACTIVE_DOC.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "ActiveDoc"))
+
+            _wait()
             entity["id"] = crd.as_dict().get("status").get(ActiveDocs.ID_NAME)
             if "service_id" in entity:
                 ide = Service.system_name_to_id.get(entity["service_id"], None)
@@ -2374,6 +2452,13 @@ class PolicyRegistry(DefaultResourceCRD, threescale_api.resources.PolicyRegistry
                 for cey, walue in constants.KEYS_POLICY_REG.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "PolicyRegistry"))
+
+            _wait()
             entity["id"] = crd.as_dict().get("status").get(PoliciesRegistry.ID_NAME)
             super().__init__(crd=crd, entity=entity, entity_name=entity_name, **kwargs)
         else:
@@ -2399,6 +2484,13 @@ class Backend(DefaultResourceCRD, threescale_api.resources.Backend):
                 for cey, walue in constants.KEYS_BACKEND.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Backend"))
+
+            _wait()
             entity["id"] = crd.as_dict().get("status").get(Backends.ID_NAME)
 
             super().__init__(crd=crd, entity=entity, entity_name=entity_name, **kwargs)
@@ -2526,6 +2618,13 @@ class BackendUsage(DefaultResourceCRD, threescale_api.resources.BackendUsage):
                 for cey, walue in constants.KEYS_BACKEND_USAGE.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "BackendUsage"))
+
+            _wait()
             entity["service_id"] = int(
                 crd.as_dict().get("status", {}).get(Services.ID_NAME, 0)
             )
@@ -2644,6 +2743,13 @@ class Account(DefaultResourceCRD, threescale_api.resources.Account):
                 for cey, walue in constants.KEYS_ACCOUNT.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Account"))
+
+            _wait()
             status = crd.as_dict().get("status", None)
             if status:
                 entity["id"] = status.get(Accounts.ID_NAME)
@@ -2705,6 +2811,13 @@ class AccountUser(DefaultResourceCRD, threescale_api.resources.AccountUser):
                 for cey, walue in constants.KEYS_ACCOUNT_USER.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "AccountUser"))
+
+            _wait()
             status = crd.as_dict().get("status", None)
             if status:
                 entity["id"] = status.get(AccountUsers.ID_NAME)
@@ -2768,6 +2881,13 @@ class Policy(DefaultResourceCRD, threescale_api.resources.Policy):
                 for cey, walue in constants.KEYS_POLICY.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Policy"))
+
+            _wait()
             entity["service_id"] = int(
                 crd.as_dict().get("status", {}).get(Services.ID_NAME, 0)
             )
@@ -2814,6 +2934,13 @@ class OpenApi(DefaultResourceCRD):
                 for cey, walue in constants.KEYS_OPEN_API.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "OpenApi"))
+
+            _wait()
             status = crd.as_dict().get("status")
             entity["id"] = status.get(OpenApis.ID_NAME)
             entity["productResourceName"] = status.get("productResourceName", {}).get(
@@ -3115,6 +3242,13 @@ class Application(DefaultResourceCRD, threescale_api.resources.Application):
                 for cey, walue in constants.KEYS_APPLICATION.items():
                     if key == walue:
                         entity[cey] = value
+
+            @backoff.on_exception(backoff.fibo, CRDNotReadyError, max_tries=BACKOFF_MAX_TRIES, jitter=None)
+            def _wait():
+                if not _is_crd_ready(crd):
+                    raise CRDNotReadyError(_crd_status_info(crd, "Application"))
+
+            _wait()
             status = crd.as_dict().get("status")
             entity["id"] = status.get(Applications.ID_NAME)
             entity["state"] = status.get("state")

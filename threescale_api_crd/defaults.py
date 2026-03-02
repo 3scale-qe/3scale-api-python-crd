@@ -1,5 +1,6 @@
 """ Module with default objects """
 
+import backoff
 import logging
 import copy
 import random
@@ -62,6 +63,14 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
     def disable_crd_implemented(self):
         """Set False to crd is implemented attribute"""
         self.__class__.CRD_IMPLEMENTED = False
+
+    def after_create(self, params, instance):
+        """Called after create with the created instance.
+
+        Override this method in subclasses to perform post-creation actions
+        like creating related CRDs (e.g., ApplicationAuth for OIDC services).
+        """
+        pass
 
     def fetch_crd_entity(self, name: str):
         """Fetches the entity based on crd name
@@ -200,7 +209,10 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
             spec["metadata"]["namespace"] = self.threescale_client.ocp_namespace
             spec["metadata"]["name"] = name
             spec = self._set_provider_ref_new_crd(spec)
-            self.before_create(params, spec)
+            # before_create may return dependent objects that need to be waited on
+            dependencies = self.before_create(params, spec) or []
+            if not isinstance(dependencies, list):
+                dependencies = [dependencies]
 
             spec["spec"].update(self.translate_to_crd(params))
             DefaultClientCRD.cleanup_spec(spec, self.KEYS, params)
@@ -238,12 +250,46 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
                 assert created_objects
                 assert success
 
+            # Wait for dependent objects created in before_create to be fully ready with IDs
+            for dep in dependencies:
+                self._wait_for_dependency_ready(dep)
+
             instance = (self._create_instance(response=created_objects)[:1] or [None])[
                 0
             ]
+
+            # Call after_create hook if defined
+            self.after_create(params, instance)
+
             return instance
 
         return threescale_api.defaults.DefaultClient.create(self, params, **kwargs)
+
+    def _wait_for_dependency_ready(self, dep):
+        """Wait for a dependent resource to be fully ready with its ID.
+
+        Args:
+            dep: tuple of (resource_instance, id_name) where resource_instance
+                 is the created dependent resource and id_name is the status
+                 field name for its ID (e.g., 'developerUserID')
+        """
+        if dep is None:
+            return
+        resource, id_name = dep
+        if resource is None or not hasattr(resource, 'crd'):
+            return
+
+        @backoff.on_predicate(backoff.fibo, lambda x: not x, max_tries=12, jitter=None)
+        def _wait():
+            resource.crd = resource.crd.refresh()
+            return self._is_ready_with_id(resource.crd, id_name)
+
+        _wait()
+        # Update the resource's entity with the ID so it doesn't need to fetch again
+        status = resource.crd.as_dict().get("status", {})
+        new_id = status.get(id_name)
+        if new_id:
+            resource._entity["id"] = new_id
 
     def _set_provider_ref_new_crd(self, spec):
         """set provider reference to new crd"""
@@ -259,21 +305,44 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
         return spec
 
     def _is_ready(self, obj):
-        """Is object ready?"""
+        """Is object ready?
+
+        Ready states:
+        - Synced=True or Ready=True (with valid ID)
+        - Orphan=True (waiting for parent resource) with no Failed/Invalid
+        """
         if not ("status" in obj.model and "conditions" in obj.model.status):
             return False
         status = obj.as_dict()["status"]
         new_id = status.get(self.ID_NAME, 0)
+        state = {"Failed": True, "Invalid": True, "Synced": False, "Ready": False, "Orphan": False}
+        for sta in status["conditions"]:
+            state[sta["type"]] = sta["status"] == "True"
+
+        if state["Failed"] or state["Invalid"]:
+            return False
+        # Orphan is valid (waiting for parent), or Synced/Ready with valid ID
+        return state["Orphan"] or ((state["Synced"] or state["Ready"]) and (new_id != 0))
+
+    def _is_ready_with_id(self, obj, id_name):
+        """Is object ready with ID populated?
+
+        Unlike _is_ready, this does NOT consider Orphan state as ready.
+        Requires Synced=True or Ready=True with a valid ID.
+        Used for waiting on dependent objects created in before_create.
+        """
+        if not ("status" in obj.model and "conditions" in obj.model.status):
+            return False
+        status = obj.as_dict()["status"]
+        new_id = status.get(id_name, 0)
         state = {"Failed": True, "Invalid": True, "Synced": False, "Ready": False}
         for sta in status["conditions"]:
             state[sta["type"]] = sta["status"] == "True"
 
-        return (
-            not state["Failed"]
-            and not state["Invalid"]
-            and (state["Synced"] or state["Ready"])
-            and (new_id != 0)
-        )
+        if state["Failed"] or state["Invalid"]:
+            return False
+        # Require Synced or Ready with valid ID (not Orphan)
+        return (state["Synced"] or state["Ready"]) and new_id != 0
 
     def _create_instance(self, response, klass=None, collection: bool = False):
         klass = klass or self._instance_klass
@@ -283,7 +352,8 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
         else:
             extracted = self._extract_resource(response, collection)
             instance = self._instantiate(extracted=extracted, klass=klass)
-        LOG.info("[INSTANCE] CRD Created instance: %s", str(instance))
+        # Avoid str(instance) as it may trigger __repr__ which accesses entity_id
+        LOG.info("[INSTANCE] CRD Created instance: %s", type(instance).__name__)
         return instance
 
     def _extract_resource_crd(self, response, collection, klass):
@@ -375,6 +445,16 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
             if result.status():
                 LOG.error("[INSTANCE] Update CRD failed: %s", str(result))
                 raise Exception(str(result))
+
+            # Wait for the CRD to be synced after update
+            @backoff.on_predicate(backoff.fibo, lambda x: not x, max_tries=12, jitter=None)
+            def _wait_for_sync():
+                resource.crd = resource.crd.refresh()
+                return self._is_ready(resource.crd)
+
+            if not _wait_for_sync():
+                LOG.warning("[UPDATE] CRD update did not reach ready state")
+
             # return self.read(resource.entity_id)
             return resource
 
@@ -579,25 +659,51 @@ class DefaultResourceCRD(threescale_api.defaults.DefaultResource):
 
     @property
     def entity_id(self) -> int:
-        return self._entity_id or self._entity.get("id") or self.get_id_from_crd()
+        """Returns entity ID, fetching from CRD if needed.
+
+        If the CRD is in Orphan state (waiting for parent), returns None
+        instead of blocking. Use get_id_from_crd() to explicitly wait.
+        """
+        if self._entity_id:
+            return self._entity_id
+        if self._entity.get("id"):
+            return self._entity.get("id")
+        # Don't block if CRD is in Orphan state - return None
+        if self._crd and self._is_orphan():
+            return None
+        return self.get_id_from_crd()
 
     @entity_id.setter
     def entity_id(self, value):
         self._entity_id = value
 
+    def _is_orphan(self):
+        """Check if the CRD is in Orphan state (waiting for parent resource)."""
+        if not self._crd:
+            return False
+        crd_dict = self._crd.as_dict()
+        status = crd_dict.get("status")
+        if not status:
+            return False
+        conditions = status.get("conditions", [])
+        for cond in conditions:
+            if cond.get("type") == "Orphan" and cond.get("status") == "True":
+                return True
+        return False
+
     def get_id_from_crd(self):
-        """Returns object id extracted from CRD."""
-        counter = 5
-        while counter > 0:
+        """Returns object id extracted from CRD.
+
+        This will wait with backoff until the ID is available.
+        """
+        # 12 tries with fibonacci backoff: 1+1+2+3+5+8+13+21+34+55+89+144 ≈ 376 seconds (~6 min)
+        @backoff.on_predicate(backoff.fibo, lambda x: x is None, max_tries=12, jitter=None)
+        def _get_id():
             self.crd = self.crd.refresh()
             status = self.crd.as_dict()["status"]
-            ret_id = status.get(self.client.ID_NAME, None)
-            if ret_id:
-                return ret_id
-            time.sleep(20)
-            counter -= 1
+            return status.get(self.client.ID_NAME, None)
 
-        return None
+        return _get_id()
 
     def get_path(self):
         """
