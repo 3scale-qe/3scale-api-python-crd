@@ -1,4 +1,4 @@
-""" Module with default objects """
+"""Module with default objects"""
 
 import logging
 import copy
@@ -88,7 +88,7 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
         """
         return self.fetch_crd_entity(name) or super().read_by_name(name, **kwargs)
 
-    def read(self, entity_id: int = None, **kwargs) -> 'DefaultResourceCRD':
+    def read(self, entity_id: int = None, **kwargs) -> "DefaultResourceCRD":
         """Read the instance, read will just create empty resource and lazyloads only if needed
         Args:
             entity_id(int): Entity id
@@ -146,7 +146,7 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
         )
         return self.fetch(entity_id, **kwargs)
 
-    def _list(self, **kwargs) -> List["DefaultResourceCRD"]:
+    def _list(self, **kwargs) -> list["DefaultResourceCRD"]:
         """Internal list implementation used in list or `select` methods
         Args:
             **kwargs: Optional parameters
@@ -232,7 +232,7 @@ class DefaultClientCRD(threescale_api.defaults.DefaultClient):
             #    timeout = 1000
 
             with ocp.timeout(timeout):
-                (success, created_objects, _) = result.until_all(
+                success, created_objects, _ = result.until_all(
                     success_func=lambda obj: self._is_ready(obj)
                 )
                 assert created_objects
@@ -411,7 +411,7 @@ class DefaultClientNestedCRD(DefaultClientCRD):
         return None
 
     # flake8: noqa C901
-    def _extract_resource_crd(self, response, collection, klass) -> Union[List, Dict]:
+    def _extract_resource_crd(self, response, collection, klass) -> list | dict:
         extract_params = {"response": response, "entity": self._entity_name}
         if collection:
             extract_params["collection"] = self._entity_collection

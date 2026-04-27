@@ -1,19 +1,22 @@
 [dev-packages]
+black = "*"
 flake8 = "*"
 mypy = "*"
 pylint = "*"
-black = "*"
-pytest = "*"
-python-dotenv = "*"
-backoff = "*"
-python-language-server = "*"
+
+#python-language-server = "*"
 #pyls-mypy = "*"
-pyls-isort = "*"
+#pyls-isort = "*"
+
+python-dotenv = "*"
+pytest = "*"
+pytest-xdist = "*"
 pytest-order = "*"
 
 [packages]
 3scale-api = "*"
 openshift-client = "*"
+python-backoff = "*"
 
 [requires]
 python_version = "3"

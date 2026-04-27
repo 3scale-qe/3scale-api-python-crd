@@ -1,4 +1,4 @@
-""" Module with resources for CRD for Threescale client """
+"""Module with resources for CRD for Threescale client"""
 
 import logging
 import copy
